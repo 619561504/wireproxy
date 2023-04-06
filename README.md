@@ -147,6 +147,9 @@ Target = service-two.servicenet:5001
 [TCPServerTunnel]
 ListenPort = 5080
 Target = service-three.servicenet:80
+
+[ConnectServerTunnel]
+ListenPort = 19443
 ```
 
 ## Donation

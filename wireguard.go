@@ -3,6 +3,10 @@ package wireproxy
 import (
 	"bytes"
 	"fmt"
+	"golang.zx2c4.com/wireguard/ipc"
+	"log"
+	"os"
+	"strconv"
 
 	"net/netip"
 
@@ -10,6 +14,11 @@ import (
 	"golang.zx2c4.com/wireguard/conn"
 	"golang.zx2c4.com/wireguard/device"
 	"golang.zx2c4.com/wireguard/tun/netstack"
+)
+
+const (
+	ENV_WG_UAPI_FD = "WG_UAPI_FD"
+	interfaceName  = "wg1"
 )
 
 // DeviceSetting contains the parameters for setting up a tun interface
@@ -25,16 +34,27 @@ func createIPCRequest(conf *DeviceConfig) (*DeviceSetting, error) {
 	var request bytes.Buffer
 
 	request.WriteString(fmt.Sprintf("private_key=%s\n", conf.SecretKey))
+	request.WriteString(fmt.Sprintf("listen_port=%d\n", conf.ListenPort))
 
 	for _, peer := range conf.Peers {
-		request.WriteString(fmt.Sprintf(heredoc.Doc(`
+		if len(peer.Endpoint) > 0 {
+			request.WriteString(fmt.Sprintf(heredoc.Doc(`
 				public_key=%s
 				endpoint=%s
 				persistent_keepalive_interval=%d
 				preshared_key=%s
 			`),
-			peer.PublicKey, peer.Endpoint, peer.KeepAlive, peer.PreSharedKey,
-		))
+				peer.PublicKey, peer.Endpoint, peer.KeepAlive, peer.PreSharedKey,
+			))
+		} else {
+			request.WriteString(fmt.Sprintf(heredoc.Doc(`
+				public_key=%s
+				persistent_keepalive_interval=%d
+				preshared_key=%s
+			`),
+				peer.PublicKey, peer.KeepAlive, peer.PreSharedKey,
+			))
+		}
 
 		if len(peer.AllowedIPs) > 0 {
 			for _, ip := range peer.AllowedIPs {
@@ -74,8 +94,43 @@ func StartWireguard(conf *DeviceConfig) (*VirtualTun, error) {
 		return nil, err
 	}
 
+	fileUAPI, err := func() (*os.File, error) {
+		uapiFdStr := os.Getenv(ENV_WG_UAPI_FD)
+		if uapiFdStr == "" {
+			return ipc.UAPIOpen(interfaceName)
+		}
+
+		// use supplied fd
+
+		fd, err := strconv.ParseUint(uapiFdStr, 10, 32)
+		if err != nil {
+			return nil, err
+		}
+
+		return os.NewFile(uintptr(fd), ""), nil
+	}()
+	if err != nil {
+		log.Printf("Failed to determine executable: %v\n", err)
+		os.Exit(1)
+	}
+	uapi, err := ipc.UAPIListen(interfaceName, fileUAPI)
+	if err != nil {
+		log.Printf("Failed to listen on uapi socket: %v", err)
+		os.Exit(1)
+	}
+
+	go func() {
+		for {
+			conn, err := uapi.Accept()
+			if err != nil {
+				continue
+			}
+			go dev.IpcHandle(conn)
+		}
+	}()
+
 	return &VirtualTun{
-		tnet:      tnet,
-		systemDNS: len(setting.dns) == 0,
+		VirtualNet: tnet,
+		systemDNS:  len(setting.dns) == 0,
 	}, nil
 }

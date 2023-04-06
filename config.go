@@ -4,8 +4,13 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"net"
+	"net/http"
 	"strings"
+	"time"
+	"wireproxy/pkg/cache"
+	"wireproxy/pkg/goproxy"
 
 	"github.com/go-ini/ini"
 
@@ -22,11 +27,12 @@ type PeerConfig struct {
 
 // DeviceConfig contains the information to initiate a wireguard connection
 type DeviceConfig struct {
-	SecretKey string
-	Endpoint  []netip.Addr
-	Peers     []PeerConfig
-	DNS       []netip.Addr
-	MTU       int
+	SecretKey  string
+	ListenPort int
+	Endpoint   []netip.Addr
+	Peers      []PeerConfig
+	DNS        []netip.Addr
+	MTU        int
 }
 
 type TCPClientTunnelConfig struct {
@@ -43,6 +49,37 @@ type Socks5Config struct {
 	BindAddress string
 	Username    string
 	Password    string
+}
+
+type ConnectServerTunnelConfig struct {
+	ListenPort int
+	IsServer   bool // 是服务端模式，还是客户端模式
+}
+
+func (c *ConnectServerTunnelConfig) SpawnRoutine(vt *VirtualTun) {
+	proxy := goproxy.New(goproxy.WithPortPeerCache(cache.DefaultCache), goproxy.WithVirtualTun(vt.VirtualNet), goproxy.WithIsServer(c.IsServer))
+
+	server := &http.Server{
+		Addr:         fmt.Sprintf(":%v", c.ListenPort),
+		Handler:      proxy,
+		ReadTimeout:  1 * time.Minute,
+		WriteTimeout: 1 * time.Minute,
+	}
+	fmt.Printf("Connect Server Listen on: :%v\n", c.ListenPort)
+	var err error
+	if c.IsServer {
+		err = server.ListenAndServe()
+	} else {
+		listener, err := vt.VirtualNet.ListenTCP(&net.TCPAddr{Port: c.ListenPort})
+		if err != nil {
+			panic(err)
+		}
+		err = server.Serve(listener)
+	}
+
+	if err != nil {
+		panic(err)
+	}
 }
 
 type Configuration struct {
@@ -63,7 +100,6 @@ func parsePort(section *ini.Section, keyName string) (int, error) {
 	if key == nil {
 		return 0, errors.New(keyName + " should not be empty")
 	}
-
 	port, err := key.Int()
 	if err != nil {
 		return 0, err
@@ -219,10 +255,19 @@ func ParseInterface(cfg *ini.File, device *DeviceConfig) error {
 		device.MTU = value
 	}
 
+	device.ListenPort = 0
+	if sectionKey, err := section.GetKey("ListenPort"); err == nil {
+		value, err := sectionKey.Int()
+		if err != nil {
+			return err
+		}
+		device.ListenPort = value
+	}
+
 	return nil
 }
 
-// ParsePeer parses the [Peer] section and extract the information into `peers`
+// ParsePeers parses the [Peer] section and extract the information into `peers`
 func ParsePeers(cfg *ini.File, peers *[]PeerConfig) error {
 	sections, err := cfg.SectionsByName("Peer")
 	if len(sections) < 1 || err != nil {
@@ -250,14 +295,12 @@ func ParsePeers(cfg *ini.File, peers *[]PeerConfig) error {
 		}
 
 		decoded, err = parseString(section, "Endpoint")
-		if err != nil {
-			return err
+		if err == nil {
+			decoded, err = resolveIPPAndPort(decoded)
+			if err == nil {
+				peer.Endpoint = decoded
+			}
 		}
-		decoded, err = resolveIPPAndPort(decoded)
-		if err != nil {
-			return err
-		}
-		peer.Endpoint = decoded
 
 		if sectionKey, err := section.GetKey("PersistentKeepalive"); err == nil {
 			value, err := sectionKey.Int()
@@ -308,6 +351,27 @@ func parseTCPServerTunnelConfig(section *ini.Section) (RoutineSpawner, error) {
 		return nil, err
 	}
 	config.Target = target
+
+	return config, nil
+}
+
+func parseConnectServerTunnelConfig(section *ini.Section) (RoutineSpawner, error) {
+	config := &ConnectServerTunnelConfig{}
+
+	listenPort, err := parsePort(section, "ListenPort")
+	if err != nil {
+		return nil, err
+	}
+	config.ListenPort = listenPort
+
+	// 解析是否是服务器模式
+	isServer := section.Key("IsServer")
+	if isServer == nil {
+		config.IsServer = false
+	} else {
+		b, _ := isServer.Bool()
+		config.IsServer = b
+	}
 
 	return config, nil
 }
@@ -376,7 +440,7 @@ func ParseConfig(path string) (*Configuration, error) {
 			return nil, err
 		}
 	}
-
+	// 解析interface
 	err = ParseInterface(wgCfg, device)
 	if err != nil {
 		return nil, err
@@ -400,6 +464,12 @@ func ParseConfig(path string) (*Configuration, error) {
 	}
 
 	err = parseRoutinesConfig(&routinesSpawners, cfg, "Socks5", parseSocks5Config)
+	if err != nil {
+		return nil, err
+	}
+
+	err = parseRoutinesConfig(&routinesSpawners, cfg, "ConnectServerTunnel", parseConnectServerTunnelConfig)
+
 	if err != nil {
 		return nil, err
 	}

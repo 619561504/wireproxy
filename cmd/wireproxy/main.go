@@ -7,8 +7,8 @@ import (
 	"os/exec"
 
 	"github.com/akamensky/argparse"
-	"github.com/octeep/wireproxy"
 	"suah.dev/protect"
+	"wireproxy"
 )
 
 // an argument to denote that this process was spawned by -d
@@ -62,7 +62,7 @@ func main() {
 	}
 	parser := argparse.NewParser("wireproxy", "Userspace wireguard client for proxying")
 
-	config := parser.String("c", "config", &argparse.Options{Help: "Path of configuration file"})
+	config := parser.String("c", "config", &argparse.Options{Help: "Path of configuration file", Default: "/Users/wuhanjie/workspace/wireproxy/wg1_client.conf"})
 	daemon := parser.Flag("d", "daemon", &argparse.Options{Help: "Make wireproxy run in background"})
 	printVerison := parser.Flag("v", "version", &argparse.Options{Help: "Print version"})
 	configTest := parser.Flag("n", "configtest", &argparse.Options{Help: "Configtest mode. Only check the configuration file for validity."})
